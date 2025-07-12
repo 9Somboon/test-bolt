@@ -4,77 +4,107 @@ import Auth from './components/Auth'
 import TodoApp from './components/TodoApp'
 import ThemeToggle from './components/ThemeToggle'
 import { Session } from '@supabase/supabase-js'
-import { v4 as uuidv4 } from 'uuid' // Import uuid for generating unique IDs
+import { v4 as uuidv4 } from 'uuid'
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [attemptingAnonymousAuth, setAttemptingAnonymousAuth] = useState(false) // New state to prevent re-attempts
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true) // True initially, until auth state is determined
+  const [hasAttemptedAnonymousSignup, setHasAttemptedAnonymousSignup] = useState(false); // New state to prevent multiple anonymous signups
 
   // Function to sign up an anonymous user
   const signUpAnonymous = useCallback(async () => {
-    if (attemptingAnonymousAuth) return; // Prevent multiple attempts
-    setAttemptingAnonymousAuth(true);
-    setLoading(true);
+    if (hasAttemptedAnonymousSignup) {
+      // Prevent multiple attempts if already tried
+      console.log('Anonymous signup already attempted, skipping.');
+      return;
+    }
+    setHasAttemptedAnonymousSignup(true); // Mark that we are attempting anonymous signup
 
     try {
       const anonymousEmail = `anon-${uuidv4()}@example.com`;
-      const anonymousPassword = uuidv4(); // Use UUID as a temporary password
+      const anonymousPassword = uuidv4();
 
+      console.log('Attempting anonymous signup...');
       const { data, error } = await supabase.auth.signUp({
         email: anonymousEmail,
         password: anonymousPassword,
         options: {
           emailRedirectTo: window.location.origin,
-          data: { is_anonymous: true } // Optional: Add a flag to user metadata
+          data: { is_anonymous: true }
         }
       });
 
       if (error) {
         console.error('Error signing up anonymous user:', error.message);
-        // If it's a duplicate user error (e.g., if we tried to sign up with the same email twice),
-        // we might need a more robust way to check for existing anonymous users.
-        // For "temporary" access, creating a new one each time session is lost is acceptable.
+        // If signup fails, onAuthStateChange will still fire with null session,
+        // and Auth component will be shown.
       } else if (data.user) {
         console.log('Anonymous user signed up:', data.user.id);
-        // The onAuthStateChange listener will pick up this session
+        // The onAuthStateChange listener will pick this up and update session.
       }
     } catch (error: any) {
       console.error('Unexpected error during anonymous signup:', error.message);
-    } finally {
-      setLoading(false);
-      setAttemptingAnonymousAuth(false);
     }
-  }, [attemptingAnonymousAuth]);
+    // CRITICAL: Do NOT set isLoadingAuth or session here.
+    // The onAuthStateChange listener is the single source of truth for the final state.
+  }, [hasAttemptedAnonymousSignup]); // Dependency to ensure it only runs once per attempt
 
   useEffect(() => {
-    const handleInitialSession = async () => {
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
-      setSession(currentSession);
-      setLoading(false);
+    let isMounted = true; // Flag to prevent state updates on unmounted component
 
-      // If no session, attempt to create an anonymous one
-      if (!currentSession && !attemptingAnonymousAuth) {
+    // This function's primary role is to kick off the initial session check
+    // and anonymous signup if needed. It does NOT manage loading states directly.
+    const initializeAuthFlow = async () => {
+      console.log('Initializing auth flow...');
+      // Get initial session. This call is crucial as it ensures
+      // onAuthStateChange is triggered with the current session state.
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      if (!isMounted) return;
+
+      // If no session, attempt anonymous signup.
+      // We await this call to ensure the signup process is initiated
+      // before the `initializeAuthFlow` function completes.
+      // The actual session update and loading state change will happen in onAuthStateChange.
+      if (!currentSession) {
+        console.log('No current session, attempting anonymous signup...');
         await signUpAnonymous();
+        if (!isMounted) return;
+      } else {
+        console.log('Existing session found:', currentSession.user?.id);
+        // If there's an existing session, onAuthStateChange will still fire
+        // with this session, and that's where we'll set isLoadingAuth to false.
       }
+      // Do NOT set isLoadingAuth = false here. Let onAuthStateChange handle it.
     };
 
-    handleInitialSession();
+    initializeAuthFlow(); // Start the initial authentication flow
 
+    // Set up the real-time auth state change listener
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
-      setLoading(false); // Ensure loading is false after any auth state change
+      if (!isMounted) return;
+      console.log('onAuthStateChange event:', _event, 'newSession:', newSession?.user?.id);
+
+      setSession(newSession); // Always update session based on the latest state from Supabase
+
+      // This is the definitive point where we know the initial auth process is complete.
+      // Whether a session exists (newly created anonymous or existing) or not,
+      // Supabase has determined the state, so we can stop loading.
+      setIsLoadingAuth(false); // Auth process is complete, stop loading
     });
 
-    // Cleanup function for Supabase subscription
+    // Cleanup function for Supabase subscription and mounted flag
     return () => {
+      isMounted = false;
       subscription.unsubscribe();
     };
-  }, [signUpAnonymous, attemptingAnonymousAuth]); // Add signUpAnonymous to dependencies
+  }, [signUpAnonymous]); // Dependency is correct
 
-  if (loading) {
+  // Display loading spinner until the initial authentication process is complete.
+  // isLoadingAuth will be true until onAuthStateChange fires for the first time.
+  if (isLoadingAuth) {
+    console.log('Rendering loading spinner...');
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <svg className="animate-spin h-12 w-12 text-primary" viewBox="0 0 24 24">
@@ -86,6 +116,9 @@ function App() {
     )
   }
 
+  // Once isLoadingAuth is false, render Auth or TodoApp based on session.
+  // If session is null (e.g., anonymous signup failed), Auth component will be shown.
+  console.log('Rendering main app, session:', session?.user?.id ? 'exists' : 'none');
   return (
     <div className="relative min-h-screen">
       <div className="absolute top-4 right-4 z-50">
